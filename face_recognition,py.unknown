@@ -1,0 +1,167 @@
+import cv2
+import numpy as np
+import os
+import csv
+from datetime import datetime, timedelta
+from tkinter import *
+from tkinter import simpledialog, messagebox
+
+# Initialize the names of known faces and their ids
+names = ['None', 'Hashir', 'JUTT','Meerab', 'Z', 'W']
+
+# Load the trained model
+recognizer = cv2.face.LBPHFaceRecognizer_create()
+recognizer.read('trainer/trainer.yml')  # Load the trained model
+cascadePath = "OpenCV-Face-Recognition/FacialRecognition/haarcascade_frontalface_default.xml"  # Ensure correct path to the cascade file
+faceCascade = cv2.CascadeClassifier(cascadePath)
+
+font = cv2.FONT_HERSHEY_SIMPLEX
+
+# Path to the CSV file where attendance will be saved
+attendance_file = 'attendance.csv'
+
+# Create the CSV file with headers if it does not exist
+if not os.path.exists(attendance_file):
+    with open(attendance_file, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(['ID', 'Name', 'Subject', 'Date', 'Time', 'Status'])
+
+# GUI setup for inputs
+root = Tk()
+root.geometry("400x200")  # Set a larger window size
+root.title("Face Recognition Attendance System")
+
+# Variables for subject and cutoff time
+subject = StringVar()
+cutoff_hour = IntVar(value=9)
+cutoff_minute = IntVar(value=0)
+is_pm = BooleanVar(value=False)  # AM/PM toggle
+
+def toggle_am_pm():
+    is_pm.set(not is_pm.get())
+
+# GUI layout
+Label(root, text="Enter Subject:", font=("Helvetica", 14)).pack(pady=5)
+subject_entry = Entry(root, textvariable=subject, font=("Helvetica", 14), width=20)
+subject_entry.pack()
+
+frame = Frame(root)
+frame.pack(pady=5)
+Label(frame, text="Cutoff Time:", font=("Helvetica", 14)).grid(row=0, column=0, padx=5)
+Spinbox(frame, from_=1, to=12, textvariable=cutoff_hour, width=5, font=("Helvetica", 14)).grid(row=0, column=1)
+Label(frame, text=":", font=("Helvetica", 14)).grid(row=0, column=2)
+Spinbox(frame, from_=0, to=59, textvariable=cutoff_minute, width=5, font=("Helvetica", 14)).grid(row=0, column=3)
+Button(frame, text="AM/PM", font=("Helvetica", 12), command=toggle_am_pm).grid(row=0, column=4, padx=5)
+
+def submit_inputs():
+    if not subject.get():
+        messagebox.showerror("Error", "Subject is required!")
+        return
+    root.destroy()
+
+Button(root, text="Start Attendance", font=("Helvetica", 14), command=submit_inputs).pack(pady=10)
+root.mainloop()
+
+if not subject.get():
+    print("Subject is required!")
+    exit()
+
+# Convert cutoff time to datetime format
+cutoff_time = datetime.strptime(f"{cutoff_hour.get()}:{cutoff_minute.get():02d} {'PM' if is_pm.get() else 'AM'}", "%I:%M %p").time()
+
+# Initialize and start real-time video capture using GStreamer pipeline
+pipeline = (
+    "v4l2src device=/dev/video0 ! "
+    "video/x-raw, width=640, height=480 ! "
+    "videoconvert ! appsink"
+)
+cam = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+if not cam.isOpened():
+    print("Error: Could not open video stream.")
+    exit()
+
+# Define minimum window size to be recognized as a face
+minW = 0.1 * cam.get(3)
+minH = 0.1 * cam.get(4)
+
+# To store the IDs of recognized people
+recognized_ids = set()
+
+while True:
+    ret, img = cam.read()
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+
+    img = cv2.flip(img, 1)  # Flip horizontally (mirror image)
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # Convert image to grayscale
+
+    faces = faceCascade.detectMultiScale(
+        gray,
+        scaleFactor=1.2,
+        minNeighbors=5,
+        minSize=(int(minW), int(minH)),
+    )
+
+    for (x, y, w, h) in faces:
+        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)  # Draw rectangle around face
+
+        id, confidence = recognizer.predict(gray[y:y + h, x:x + w])
+
+        # Clean the confidence string to get the numeric value
+        confidence_value = float(confidence)  # Convert to float
+
+        # Check if confidence is less than 100 ==> "0" is perfect match 
+        if confidence_value < 100:
+            name = names[id]
+            confidence = "  {0}%".format(round(100 - confidence_value))  # Confidence value
+        else:
+            name = "unknown"
+            confidence = "  {0}%".format(round(100 - confidence_value))
+
+        # Display name on the frame
+        cv2.putText(img, str(name), (x + 5, y - 5), font, 1, (255, 255, 255), 2)
+
+        # Remove confidence display if recognized face (confidence < 100)
+        if confidence_value < 100:
+            # Do not display confidence
+            pass
+        else:
+            # Display confidence if unknown
+            cv2.putText(img, str(confidence), (x + 5, y + h - 5), font, 1, (255, 255, 0), 1)
+
+        # Log attendance if a person is recognized (confidence < 100) and not already recorded
+        if confidence_value < 100 and id not in recognized_ids:
+            now = datetime.now()  # Get current date and time
+            date = now.strftime("%Y-%m-%d")
+            time = now.strftime("%I:%M %p")  # Include AM/PM format
+            current_time = datetime.strptime(time, "%I:%M %p").time()
+            status = "Late" if current_time > cutoff_time else "On Time"
+
+            # Append the attendance record to the CSV file
+            with open(attendance_file, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow([id, name, subject.get(), date, time, status])
+
+            # Mark the person as recognized
+            recognized_ids.add(id)
+
+            # Display attendance status
+            status_color = (0, 0, 255) if status == "Late" else (0, 255, 0)
+            cv2.putText(img, status, (x, y - 25), font, 1, status_color, 2)
+
+            print(f"Attendance recorded for {name} at {time} with status: {status}")
+
+    # Display the image with recognized face
+    cv2.imshow('Jetson Nano - Real-Time Face Recognition', img)
+
+    k = cv2.waitKey(10) & 0xFF  # Press 'ESC' to exit
+    if k == 27:
+        break
+
+# Cleanup and release resources
+print("\n [INFO] Exiting Program and cleanup")
+cam.release()
+cv2.destroyAllWindows()
